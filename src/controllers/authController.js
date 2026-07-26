@@ -34,7 +34,7 @@ async function login(req, res) {
 }
 
 async function me(req, res) {
-  return res.json({ user: req.user });
+  return res.json({ message: 'Rota /me está online.' });
 }
 
 module.exports = { login, me };
