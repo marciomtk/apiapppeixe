@@ -17,3 +17,29 @@ model User {
   password  String
   createdAt DateTime @default(now())
 }
+
+model Tanque {
+  codigo       String    @id
+  nome         String
+  especie      String
+  quantidade   Int
+  pesoMedio    Float
+  token        String
+  ultimoPingEm DateTime?
+  criadoEm     DateTime  @default(now())
+  atualizadoEm DateTime  @updatedAt
+
+  horarios     Horario[]
+}
+
+model Horario {
+  id           Int      @id @default(autoincrement())
+  tanqueCodigo String
+  hora         String
+  peso         Float
+  criadoEm     DateTime @default(now())
+
+  tanque       Tanque   @relation(fields: [tanqueCodigo], references: [codigo], onDelete: Cascade)
+
+  @@index([tanqueCodigo])
+}
