@@ -19,17 +19,23 @@ model User {
 }
 
 model Tanque {
-  codigo       String    @id
-  nome         String
-  especie      String
-  quantidade   Int
-  pesoMedio    Float
-  token        String
-  ultimoPingEm DateTime?
-  criadoEm     DateTime  @default(now())
-  atualizadoEm DateTime  @updatedAt
+  codigo           String    @id
+  nome             String
+  especie          String
+  quantidade       Int
+  pesoMedio        Float
+  token            String
+  ultimoPingEm     DateTime?
+  criadoEm         DateTime  @default(now())
+  atualizadoEm     DateTime  @updatedAt
 
-  horarios     Horario[]
+  // Ração no silo: quantidade abastecida (kg) e quando foi abastecida.
+  // O consumo é projetado a partir daí usando o total diário de ração
+  // dos horários cadastrados (sem precisar de telemetria do ESP32).
+  quantidadeSiloKg Float     @default(0)
+  siloAbastecidoEm DateTime?
+
+  horarios         Horario[]
 }
 
 model Horario {

@@ -1,8 +1,8 @@
 const prisma = require('../lib/prisma');
 
-// 3x o intervalo de ping do ESP32 (5s), para tolerar um ping perdido
+// 3x o intervalo de ping do ESP32 (1 min), para tolerar um ping perdido
 // antes de considerar o alimentador offline.
-const PING_TIMEOUT_MS = 15000;
+const PING_TIMEOUT_MS = 180000;
 
 function minutosDoDia(hora) {
   const [h, m] = hora.split(':').map(Number);
@@ -50,6 +50,47 @@ function calcularUltimoTrato(horarios) {
   return { hora: alvo.hora, peso: alvo.peso };
 }
 
+// Projeta a quantidade de ração restante no silo com base no tempo
+// desde o último abastecimento e no consumo diário (soma dos pesos dos
+// horários cadastrados) — sem depender de telemetria do ESP32.
+function calcularSilo(tanque) {
+  const capacidadeKg = tanque.quantidadeSiloKg ?? 0;
+  const abastecidoEm = tanque.siloAbastecidoEm;
+
+  const consumoDiarioGramas = (tanque.horarios || []).reduce(
+    (soma, h) => soma + h.peso,
+    0,
+  );
+
+  if (capacidadeKg <= 0) {
+    return {
+      quantidadeAtualKg: 0,
+      capacidadeKg: 0,
+      percentual: 0,
+      diasRestantes: null,
+      consumoDiarioGramas,
+    };
+  }
+
+  const diasPassados = abastecidoEm
+    ? (Date.now() - abastecidoEm.getTime()) / 86400000
+    : 0;
+
+  const consumidoKg = (diasPassados * consumoDiarioGramas) / 1000;
+  const atualKg = Math.max(0, capacidadeKg - consumidoKg);
+  const percentual = Math.round((atualKg / capacidadeKg) * 100);
+  const diasRestantes =
+    consumoDiarioGramas > 0 ? Math.floor(atualKg / (consumoDiarioGramas / 1000)) : null;
+
+  return {
+    quantidadeAtualKg: Math.round(atualKg * 10) / 10,
+    capacidadeKg,
+    percentual,
+    diasRestantes,
+    consumoDiarioGramas,
+  };
+}
+
 function serializarTanque(tanque) {
   const online =
     !!tanque.ultimoPingEm &&
@@ -65,6 +106,7 @@ function serializarTanque(tanque) {
     ultimoPingEm: tanque.ultimoPingEm,
     proximaAlimentacao: calcularProximaAlimentacao(tanque.horarios)?.hora ?? null,
     ultimoTrato: calcularUltimoTrato(tanque.horarios),
+    silo: calcularSilo(tanque),
   };
 }
 
@@ -121,7 +163,7 @@ async function registrar(req, res) {
 // que só é definido/trocado refazendo a configuração pelo app+BLE).
 async function atualizar(req, res) {
   const { codigo } = req.params;
-  const { nome, especie, quantidade, pesoMedio } = req.body;
+  const { nome, especie, quantidade, pesoMedio, quantidadeSiloKg } = req.body;
 
   const data = {};
 
@@ -142,6 +184,19 @@ async function atualizar(req, res) {
       return res.status(400).json({ error: '"pesoMedio" deve ser numérico.' });
     }
     data.pesoMedio = pesoMedioNum;
+  }
+
+  if (quantidadeSiloKg !== undefined) {
+    const siloNum = Number(quantidadeSiloKg);
+    if (!Number.isFinite(siloNum) || siloNum < 0) {
+      return res
+        .status(400)
+        .json({ error: '"quantidadeSiloKg" deve ser numérico e não-negativo.' });
+    }
+    // Editar esse campo representa um (re)abastecimento: reinicia a
+    // contagem de dias usada para projetar o consumo.
+    data.quantidadeSiloKg = siloNum;
+    data.siloAbastecidoEm = new Date();
   }
 
   const tanqueExistente = await prisma.tanque.findUnique({ where: { codigo } });
