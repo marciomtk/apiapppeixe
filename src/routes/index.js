@@ -23,6 +23,7 @@ router.post('/tanques/:codigo/ping', tanqueController.ping);
 router.get('/tanques', tanqueController.listar);
 router.get('/tanques/:codigo', tanqueController.detalhar);
 router.patch('/tanques/:codigo', tanqueController.atualizar);
+router.delete('/tanques/:codigo', tanqueController.remover);
 
 router.get('/tanques/:codigo/horarios', tanqueController.listarHorarios);
 router.post('/tanques/:codigo/horarios', tanqueController.criarHorario);

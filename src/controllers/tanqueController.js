@@ -214,6 +214,21 @@ async function atualizar(req, res) {
   return res.json(serializarTanque(tanque));
 }
 
+// Exclui o tanque (e seus horários, em cascata) permanentemente.
+async function remover(req, res) {
+  const { codigo } = req.params;
+
+  const tanqueExistente = await prisma.tanque.findUnique({ where: { codigo } });
+
+  if (!tanqueExistente) {
+    return res.status(404).json({ error: 'Tanque não encontrado.' });
+  }
+
+  await prisma.tanque.delete({ where: { codigo } });
+
+  return res.status(204).send();
+}
+
 async function ping(req, res) {
   const { codigo } = req.params;
   const authHeader = req.headers.authorization || '';
@@ -364,6 +379,7 @@ async function removerHorario(req, res) {
 module.exports = {
   registrar,
   atualizar,
+  remover,
   ping,
   listar,
   detalhar,
