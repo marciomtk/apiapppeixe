@@ -118,6 +118,80 @@ function serializarHorario(horario) {
   };
 }
 
+// =============================
+// Protocolo "chave=valor|chave=valor" com o ESP32
+// =============================
+// Mesmo formato usado no BLE (onRead/onWrite do firmware), reaproveitado
+// aqui para a sincronização direta com a API — assim o ESP32 usa as
+// mesmas funções de parsing (extrairCampo/aplicarHorariosString) tanto
+// para BLE quanto para HTTP, sem precisar de uma lib de JSON.
+
+function horariosParaPipe(horarios) {
+  return (horarios || [])
+    .map((h) => `${h.hora}-${Math.round(h.peso)}`)
+    .join(';');
+}
+
+function parsePipeConfig(texto) {
+  const campos = {};
+
+  String(texto || '')
+    .split('|')
+    .forEach((segmento) => {
+      const idx = segmento.indexOf('=');
+      if (idx === -1) return;
+      campos[segmento.slice(0, idx)] = segmento.slice(idx + 1);
+    });
+
+  return campos;
+}
+
+function parseHorariosPipe(texto) {
+  if (!texto) return [];
+
+  return String(texto)
+    .split(';')
+    .map((item) => {
+      const [hora, peso] = item.split('-');
+      return { hora, peso: Number(peso) };
+    })
+    .filter((h) => /^\d{2}:\d{2}$/.test(h.hora || '') && Number.isFinite(h.peso));
+}
+
+function serializarConfigPipe(tanque) {
+  return [
+    `nome=${tanque.nome}`,
+    `especie=${tanque.especie}`,
+    `qtd=${tanque.quantidade}`,
+    `peso=${tanque.pesoMedio}`,
+    `horarios=${horariosParaPipe(tanque.horarios)}`,
+    `atualizadoEm=${tanque.atualizadoEm.getTime()}`,
+  ].join('|');
+}
+
+// Valida o Bearer token do ESP32 contra o token salvo para o tanque.
+// Retorna o tanque (sem horarios) se válido, ou envia a resposta de erro
+// e retorna null.
+async function autenticarDispositivo(req, res) {
+  const { codigo } = req.params;
+  const authHeader = req.headers.authorization || '';
+  const [scheme, token] = authHeader.split(' ');
+
+  if (scheme !== 'Bearer' || !token) {
+    res.status(401).type('text/plain').send('ERRO:token_ausente');
+    return null;
+  }
+
+  const tanque = await prisma.tanque.findUnique({ where: { codigo } });
+
+  if (!tanque || tanque.token !== token) {
+    res.status(401).type('text/plain').send('ERRO:token_invalido');
+    return null;
+  }
+
+  return tanque;
+}
+
 async function registrar(req, res) {
   const { codigo, nome, especie, quantidade, pesoMedio, token } = req.body;
 
@@ -229,27 +303,95 @@ async function remover(req, res) {
   return res.status(204).send();
 }
 
+// Resposta em texto puro (não JSON) porque quem chama é o ESP32, que já
+// tem um parser "chave=valor" pronto do protocolo BLE — evita depender
+// de uma lib de JSON no firmware. O "atualizadoEm" deixa o ESP32 saber,
+// a cada ping, se a config dele está desatualizada em relação à API.
 async function ping(req, res) {
   const { codigo } = req.params;
-  const authHeader = req.headers.authorization || '';
-  const [scheme, token] = authHeader.split(' ');
 
-  if (scheme !== 'Bearer' || !token) {
-    return res.status(401).json({ error: 'Token não informado.' });
-  }
-
-  const tanque = await prisma.tanque.findUnique({ where: { codigo } });
-
-  if (!tanque || tanque.token !== token) {
-    return res.status(401).json({ error: 'Token inválido para este tanque.' });
-  }
+  const tanque = await autenticarDispositivo(req, res);
+  if (!tanque) return;
 
   const atualizado = await prisma.tanque.update({
     where: { codigo },
     data: { ultimoPingEm: new Date() },
   });
 
-  return res.json({ status: 'online', ultimoPingEm: atualizado.ultimoPingEm });
+  return res
+    .type('text/plain')
+    .send(`status=online|atualizadoEm=${atualizado.atualizadoEm.getTime()}`);
+}
+
+// Chamado pelo ESP32 quando detecta que fez uma alteração local (via
+// BLE) enquanto estava sem internet: assim que a conexão volta, ele
+// empurra a config pendente para a API em vez de esperar o app fazer
+// isso (o app pode nunca mais passar perto daquele tanque).
+// Corpo: texto puro no mesmo formato do onRead do BLE
+// ("nome=..|especie=..|qtd=..|peso=..|horarios=..").
+async function sincronizarDoDispositivo(req, res) {
+  const { codigo } = req.params;
+
+  const tanque = await autenticarDispositivo(req, res);
+  if (!tanque) return;
+
+  const campos = parsePipeConfig(req.body);
+
+  const data = {};
+
+  if (campos.nome !== undefined) data.nome = campos.nome;
+  if (campos.especie !== undefined) data.especie = campos.especie;
+
+  if (campos.qtd !== undefined) {
+    const qtdNum = Number(campos.qtd);
+    if (Number.isFinite(qtdNum)) data.quantidade = qtdNum;
+  }
+
+  if (campos.peso !== undefined) {
+    const pesoNum = Number(campos.peso);
+    if (Number.isFinite(pesoNum)) data.pesoMedio = pesoNum;
+  }
+
+  const horarios =
+    campos.horarios !== undefined ? parseHorariosPipe(campos.horarios) : null;
+
+  const atualizado = await prisma.$transaction(async (tx) => {
+    if (Object.keys(data).length > 0) {
+      await tx.tanque.update({ where: { codigo }, data });
+    }
+
+    if (horarios !== null) {
+      await tx.horario.deleteMany({ where: { tanqueCodigo: codigo } });
+
+      if (horarios.length > 0) {
+        await tx.horario.createMany({
+          data: horarios.map((h) => ({ tanqueCodigo: codigo, hora: h.hora, peso: h.peso })),
+        });
+      }
+    }
+
+    return tx.tanque.findUnique({ where: { codigo }, include: { horarios: true } });
+  });
+
+  return res.type('text/plain').send(serializarConfigPipe(atualizado));
+}
+
+// Chamado pelo ESP32 quando o ping acusa uma versão (atualizadoEm) mais
+// nova do que a que ele conhece — provavelmente porque a config foi
+// editada pelo app diretamente na API, sem passar pelo BLE. Devolve o
+// snapshot atual no mesmo formato pipe, para o ESP32 aplicar localmente.
+async function obterConfigDispositivo(req, res) {
+  const { codigo } = req.params;
+
+  const tanque = await autenticarDispositivo(req, res);
+  if (!tanque) return;
+
+  const completo = await prisma.tanque.findUnique({
+    where: { codigo },
+    include: { horarios: true },
+  });
+
+  return res.type('text/plain').send(serializarConfigPipe(completo));
 }
 
 // Lista os dispositivos (tanques) já configurados, para a seção
@@ -381,6 +523,8 @@ module.exports = {
   atualizar,
   remover,
   ping,
+  sincronizarDoDispositivo,
+  obterConfigDispositivo,
   listar,
   detalhar,
   listarHorarios,
